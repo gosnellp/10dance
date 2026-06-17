@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>10Dance — Attendance</title>
+<style>
+  /* ===== 10Dance — Phase 0–1 scaffold =====
+     Tap-only attendance. Navy background, pill tiles, 3 states.
+     Data is stored locally in this browser (localStorage). No server, no login.
+     Phase 4 will migrate storage to IndexedDB + auto-backup to your Vault. */
+
+  :root{
+    --navy:        #0F1B3D;   /* page background */
+    --navy-card:   #1B2A52;   /* panels */
+    --navy-line:   #2C3E73;   /* borders */
+    --ink:         #EAF0FF;   /* light text on navy */
+    --ink-dim:     #9FB0DA;   /* secondary text */
+    --present:     #A5D6A7;   /* light green  (black text) */
+    --tardy:       #FFE082;   /* light amber  (black text) */
+    --absent:      #EF9A9A;   /* light red    (black text) */
+    --accent:      #6F9BFF;
+  }
+
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; background:var(--navy); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.4;
+  }
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 20px; border-bottom:1px solid var(--navy-line);
+    position:sticky; top:0; background:var(--navy); z-index:5;
+  }
+  .brand{ font-weight:800; font-size:22px; letter-spacing:.5px; }
+  .brand small{ font-weight:500; color:var(--ink-dim); font-size:12px; display:block; }
+  .tabs{ display:flex; gap:8px; }
+  .tab{
+    background:var(--navy-card); color:var(--ink); border:1px solid var(--navy-line);
+    padding:8px 16px; border-radius:999px; cursor:pointer; font-size:14px; font-weight:600;
+  }
+  .tab.active{ background:var(--accent); color:#06122E; border-color:var(--accent); }
+
+  main{ padding:20px; max-width:1000px; margin:0 auto; }
+
+  .controls{
+    display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; margin-bottom:18px;
+  }
+  .field{ display:flex; flex-direction:column; gap:4px; }
+  .field label{ font-size:12px; color:var(--ink-dim); text-transform:uppercase; letter-spacing:.5px; }
+  select,input[type=date],input[type=text],input[type=time],input[type=email]{
+    background:var(--navy-card); color:var(--ink); border:1px solid var(--navy-line);
+    border-radius:8px; padding:9px 11px; font-size:15px; min-width:150px;
+  }
+  .meta{ color:var(--ink-dim); font-size:13px; margin:-6px 0 16px; }
+
+  /* ----- pill tiles ----- */
+  .tiles{ display:flex; flex-wrap:wrap; gap:12px; margin-top:6px; }
+  .pill{
+    border:none; border-radius:999px; padding:12px 22px; min-width:160px;
+    color:#111; cursor:pointer; text-align:center; font:inherit;
+    display:flex; flex-direction:column; align-items:center; gap:2px;
+    box-shadow:0 2px 0 rgba(0,0,0,.25); transition:transform .05s ease;
+  }
+  .pill:active{ transform:translateY(1px); }
+  .pill .glyph{ font-size:20px; line-height:1; }
+  .pill .name{ font-weight:700; font-size:16px; }
+  .pill .state{ font-size:11px; text-transform:uppercase; letter-spacing:.6px; opacity:.8; }
+  .s-present{ background:var(--present); }
+  .s-tardy{   background:var(--tardy); }
+  .s-absent{  background:var(--absent); }
+
+  /* ----- tallies ----- */
+  .panel{ background:var(--navy-card); border:1px solid var(--navy-line); border-radius:12px; padding:16px; margin-top:26px; }
+  .panel h2{ margin:0 0 12px; font-size:16px; }
+  table{ width:100%; border-collapse:collapse; font-size:14px; }
+  th,td{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--navy-line); }
+  th{ color:var(--ink-dim); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  .num{ text-align:center; }
+  .flag{ color:#06122E; background:var(--absent); border-radius:999px; padding:2px 10px; font-size:12px; font-weight:700; }
+
+  /* ----- semester grid cells ----- */
+  .gc{ font-weight:700; color:#111; min-width:34px; }
+  .g-present{ background:rgba(165,214,167,.25); color:var(--ink-dim); font-weight:500; }
+  .g-tardy{   background:var(--tardy); }
+  .g-absent{  background:var(--absent); }
+
+  /* ----- buttons ----- */
+  .btn{
+    background:var(--accent); color:#06122E; border:none; border-radius:8px;
+    padding:11px 18px; font-size:15px; font-weight:700; cursor:pointer;
+  }
+  .btn.secondary{ background:var(--navy-card); color:var(--ink); border:1px solid var(--navy-line); }
+  .btn.danger{ background:transparent; color:var(--absent); border:1px solid var(--absent); font-weight:600; }
+  .btnrow{ display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+
+  .empty{ text-align:center; color:var(--ink-dim); padding:40px 20px; }
+  .empty p{ margin:6px 0; }
+
+  /* ----- manage view ----- */
+  .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  @media (max-width:760px){ .grid2{ grid-template-columns:1fr; } }
+  .daybox{ display:flex; gap:6px; flex-wrap:wrap; }
+  .daybox label{ display:flex; align-items:center; gap:4px; background:var(--navy); border:1px solid var(--navy-line);
+    border-radius:8px; padding:6px 10px; font-size:13px; cursor:pointer; }
+  .roster-item{ display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--navy-line); }
+  .roster-item .dn{ font-weight:700; }
+  .roster-item .em{ color:var(--ink-dim); font-size:13px; }
+  .toast{ position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+    background:var(--accent); color:#06122E; padding:10px 18px; border-radius:999px;
+    font-weight:700; font-size:14px; opacity:0; transition:opacity .25s; pointer-events:none; }
+  .toast.show{ opacity:1; }
+  .nudgebar{ background:var(--tardy); color:#111; padding:8px 16px; display:flex; gap:14px;
+    align-items:center; justify-content:center; flex-wrap:wrap; font-weight:600; font-size:13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">10Dance<small>Tap-to-track attendance</small></div>
+  <div class="tabs">
+    <button class="tab active" id="tab-today" onclick="setTab('today')">Today</button>
+    <button class="tab" id="tab-semester" onclick="setTab('semester')">Semester</button>
+    <button class="tab" id="tab-manage" onclick="setTab('manage')">Manage</button>
+  </div>
+</header>
+
+<div id="nudge"></div>
+<main id="app"></main>
+<div class="toast" id="toast"></div>
+
+<script>
+/* =========================================================================
+   STORAGE  — three keys in localStorage, each a JSON value.
+   sections   : list of classes (name, code, meeting days, start/end time)
+   students   : list of students (first, last, email, sectionId)
+   attendance : object keyed "sectionId__YYYY-MM-DD__studentId" = state
+   ========================================================================= */
+/* Adaptive store: IndexedDB when it works (more robust, more capacity),
+   automatic localStorage fallback when the app is opened as a bare file
+   (file://), where IndexedDB is often blocked. Either way the real safety
+   net is the JSON Backup file in Manage -> Data & backup. */
+const Storage = (function(){
+  let mode='idb', db=null;
+  const lsKey = k => 'tenDance_'+k;
+  function open(){ return new Promise((res,rej)=>{
+    let req; try{ req=indexedDB.open('tenDanceDB',1); }catch(e){ return rej(e); }
+    req.onupgradeneeded=()=>req.result.createObjectStore('kv');
+    req.onsuccess=()=>res(req.result);
+    req.onerror=()=>rej(req.error||new Error('idb'));
+    req.onblocked=()=>rej(new Error('idb blocked'));
+  }); }
+  const put=(k,v)=>new Promise((res,rej)=>{ const tx=db.transaction('kv','readwrite'); tx.objectStore('kv').put(v,k); tx.oncomplete=res; tx.onerror=()=>rej(tx.error); });
+  const rd =k=>new Promise((res,rej)=>{ const r=db.transaction('kv','readonly').objectStore('kv').get(k); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); });
+  const del=k=>new Promise((res,rej)=>{ const tx=db.transaction('kv','readwrite'); tx.objectStore('kv').delete(k); tx.oncomplete=res; tx.onerror=()=>rej(tx.error); });
+  async function init(){
+    try{ db=await open(); await put('__t',1); if(await rd('__t')!==1) throw 0; await del('__t'); mode='idb'; }
+    catch(e){ mode='ls'; db=null; }
+    return mode;
+  }
+  async function get(k){
+    if(mode==='idb'){ try{ return await rd(k); }catch(e){ mode='ls'; } }
+    try{ return JSON.parse(localStorage.getItem(lsKey(k))); }catch(e){ return null; }
+  }
+  async function set(k,v){
+    if(mode==='idb'){ try{ await put(k,v); return; }catch(e){ mode='ls'; } }
+    try{ localStorage.setItem(lsKey(k), JSON.stringify(v)); }catch(e){}
+  }
+  return { init, get, set, mode:()=>mode };
+})();
+
+let sections=[], students=[], attendance={}, reminders={};   // reminders key: "sectionId__studentId__milestone"
+let meta={ lastBackupAt:null, changes:0, migrated:false };
+
+function saveSections(){ Storage.set('sections',sections); bumpChange(); }
+function saveStudents(){ Storage.set('students',students); bumpChange(); }
+function saveAttendance(){ Storage.set('attendance',attendance); bumpChange(); }
+function saveReminders(){ Storage.set('reminders',reminders); bumpChange(); }
+function saveAll(){ return Promise.all([Storage.set('sections',sections),Storage.set('students',students),
+  Storage.set('attendance',attendance),Storage.set('reminders',reminders)]); }
+function bumpChange(){ meta.changes=(meta.changes||0)+1; Storage.set('meta',meta); updateNudge(); }
+function remKey(sec,stu,m){ return sec+'__'+stu+'__'+m; }
+function uid(){ return 'id'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
+
+/* Boot: open store, load data, import any older data, then render. */
+async function boot(){
+  await Storage.init();
+  sections   = await Storage.get('sections')   || [];
+  students   = await Storage.get('students')   || [];
+  attendance = await Storage.get('attendance') || {};
+  reminders  = await Storage.get('reminders')  || {};
+  meta       = await Storage.get('meta')       || { lastBackupAt:null, changes:0, migrated:false };
+  await migrateOld();
+  render(); updateNudge();
+}
+async function migrateOld(){
+  if(meta.migrated) return;
+  const empty = !sections.length && !students.length && !Object.keys(attendance).length;
+  if(empty){
+    const oS=lsJSON('10dance_sections'), oU=lsJSON('10dance_students'),
+          oA=lsJSON('10dance_attendance'), oR=lsJSON('10dance_reminders');
+    if(oS||oU||oA||oR){
+      sections=oS||[]; students=oU||[]; attendance=oA||{}; reminders=oR||{};
+      await saveAll(); toast('Imported your existing data');
+    }
+  }
+  meta.migrated=true; await Storage.set('meta',meta);
+}
+function lsJSON(k){ try{ return JSON.parse(localStorage.getItem(k)); }catch(e){ return null; } }
+
+/* ---- backup / restore / nudge ---- */
+function backupNow(){
+  const payload={ app:'10Dance', version:1, exportedAt:new Date().toISOString(),
+    data:{sections,students,attendance,reminders} };
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}));
+  a.download='10Dance_backup_'+todayStr()+'.json'; a.click(); URL.revokeObjectURL(a.href);
+  meta.lastBackupAt=new Date().toISOString(); meta.changes=0; Storage.set('meta',meta);
+  updateNudge(); if(view.tab==='manage') renderManage();
+  toast('Backup saved — keep it in your Vault');
+}
+function triggerRestore(){ document.getElementById('restoreInput').click(); }
+function restoreFile(input){
+  const f=input.files&&input.files[0]; input.value='';
+  if(!f) return;
+  const r=new FileReader();
+  r.onload=async ()=>{
+    let obj; try{ obj=JSON.parse(r.result); }catch(e){ return toast('Could not read that file'); }
+    if(!obj || obj.app!=='10Dance' || !obj.data) return toast('Not a 10Dance backup file');
+    if(!confirm('Replace ALL current data with this backup? This cannot be undone.')) return;
+    sections=obj.data.sections||[]; students=obj.data.students||[];
+    attendance=obj.data.attendance||{}; reminders=obj.data.reminders||{};
+    await saveAll(); meta.lastBackupAt=obj.exportedAt||meta.lastBackupAt; meta.changes=0;
+    await Storage.set('meta',meta); toast('Backup restored'); render(); updateNudge();
+  };
+  r.readAsText(f);
+}
+function updateNudge(){
+  const n=document.getElementById('nudge'); if(!n) return;
+  n.innerHTML = (meta && meta.changes>0)
+    ? `<div class="nudgebar"><span>⚠ ${meta.changes} change${meta.changes>1?'s':''} since your last backup — a cleared browser would lose them.</span>
+       <button class="btn" style="padding:5px 12px;font-size:13px;" onclick="backupNow()">⬇ Back up now</button></div>`
+    : '';
+}
+function fmtWhen(iso){ if(!iso) return 'never'; const d=new Date(iso);
+  return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
+
+/* =========================================================================
+   ATTENDANCE-POLICY EMAIL  — edit this text freely; it becomes the email body.
+   Reminders fire at exactly the milestones below (effective absences).
+   ========================================================================= */
+const REMINDER_MILESTONES = [3, 7];
+const POLICY_LINES = [
+  "5 absences = minus one full letter grade from the final average",
+  "9 absences = automatic failure of the course (F)",
+  "Three tardies = one absence"
+];
+const POLICY_SIGNATURE = "Prof. Patrick Gosnell\nDepartment of Art + Design\nAustin Peay State University";
+
+/* =========================================================================
+   VIEW STATE
+   ========================================================================= */
+let view = { tab:'today', sectionId:null, date:todayStr() };
+
+function todayStr(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function weekdayOf(dateStr){
+  const [y,m,d]=dateStr.split('-').map(Number);
+  return new Date(y,m-1,d).getDay(); // 0=Sun .. 6=Sat
+}
+function nowHHMM(){
+  const d=new Date();
+  return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+}
+function prettyDate(dateStr){
+  const [y,m,d]=dateStr.split('-').map(Number);
+  return new Date(y,m-1,d).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+}
+
+/* Find the section meeting right now (today + current time inside its window). */
+function detectSection(){
+  const day=weekdayOf(todayStr()), t=nowHHMM();
+  return sections.find(s => (s.days||[]).includes(day) && s.start<=t && t<=s.end) || null;
+}
+
+/* =========================================================================
+   DISPLAY NAMES  — first name + shortest unique last-name prefix.
+   "Marcus L." normally; "Marcus La." / "Marcus Le." when two collide;
+   a third letter if two still collide.
+   ========================================================================= */
+function displayNames(sectionId){
+  const list = students.filter(s=>s.sectionId===sectionId);
+  const byFirst = {};
+  list.forEach(s=>{ const k=s.first.trim().toLowerCase(); (byFirst[k]=byFirst[k]||[]).push(s); });
+  const map={};
+  list.forEach(s=>{
+    const group = byFirst[s.first.trim().toLowerCase()];
+    let len=1;
+    if(group.length>1){
+      const others=group.filter(o=>o!==s);
+      while(len < s.last.length){
+        const mine=s.last.slice(0,len).toLowerCase();
+        const clash=others.some(o=>o.last.slice(0,len).toLowerCase()===mine);
+        if(!clash) break;
+        len++;
+      }
+    }
+    const pre=s.last.slice(0,len);
+    const cap=pre.charAt(0).toUpperCase()+pre.slice(1).toLowerCase();
+    map[s.id]= s.first.trim()+' '+cap+'.';
+  });
+  return map;
+}
+
+/* =========================================================================
+   ATTENDANCE HELPERS
+   ========================================================================= */
+const ORDER=['present','tardy','absent'];
+const GLYPH={present:'✓', tardy:'◷', absent:'✕'}; // ✓ ◷ ✕
+function attKey(sec,date,stu){ return sec+'__'+date+'__'+stu; }
+function sessionExists(sec,date){
+  const p=sec+'__'+date+'__';
+  return Object.keys(attendance).some(k=>k.startsWith(p));
+}
+function startSession(sec,date){
+  students.filter(s=>s.sectionId===sec).forEach(s=>{ attendance[attKey(sec,date,s.id)]='present'; });
+  saveAttendance();
+}
+function clearSession(sec,date){
+  const p=sec+'__'+date+'__';
+  Object.keys(attendance).forEach(k=>{ if(k.startsWith(p)) delete attendance[k]; });
+  saveAttendance();
+}
+function cycle(key){
+  const cur=attendance[key]||'present';
+  attendance[key]=ORDER[(ORDER.indexOf(cur)+1)%3];
+  saveAttendance();
+}
+function tallies(sectionId){
+  const dn=displayNames(sectionId);
+  return students.filter(s=>s.sectionId===sectionId).map(s=>{
+    let p=0,t=0,a=0;
+    Object.keys(attendance).forEach(k=>{
+      const parts=k.split('__');
+      if(parts[0]===sectionId && parts[2]===s.id){
+        const st=attendance[k];
+        if(st==='present')p++; else if(st==='tardy')t++; else if(st==='absent')a++;
+      }
+    });
+    const eff=a+Math.floor(t/3);
+    const reached=REMINDER_MILESTONES.filter(m=>eff>=m);
+    const due=[...reached].reverse().find(m=>!reminders[remKey(sectionId,s.id,m)]); // highest unsent milestone reached
+    const sentMs=REMINDER_MILESTONES.filter(m=>reminders[remKey(sectionId,s.id,m)]);
+    const sentMax=sentMs.length?Math.max(...sentMs):0;
+    return {id:s.id,name:dn[s.id],p,t,a,eff,due,sentMax,flag:reached.length>0};
+  }).sort((x,y)=>x.name.localeCompare(y.name));
+}
+
+/* =========================================================================
+   RENDER
+   ========================================================================= */
+const app=document.getElementById('app');
+
+function setTab(t){
+  view.tab=t;
+  ['today','semester','manage'].forEach(x=>document.getElementById('tab-'+x).classList.toggle('active',x===t));
+  render();
+}
+function render(){
+  if(view.tab==='today') renderToday();
+  else if(view.tab==='semester') renderSemester();
+  else renderManage();
+}
+
+/* ---------- TODAY ---------- */
+function renderToday(){
+  if(sections.length===0){
+    app.innerHTML = `<div class="empty">
+      <p style="font-size:18px;font-weight:700;">No classes yet.</p>
+      <p>Add a class under <b>Manage</b>, or load a sample to start tapping.</p>
+      <div class="btnrow" style="justify-content:center;">
+        <button class="btn" onclick="loadDemo()">Load demo class</button>
+        <button class="btn secondary" onclick="setTab('manage')">Go to Manage</button>
+      </div></div>`;
+    return;
+  }
+
+  // default the selected section to the live class, else first section
+  if(!view.sectionId || !sections.some(s=>s.id===view.sectionId)){
+    const live=detectSection();
+    view.sectionId = live ? live.id : sections[0].id;
+  }
+  const sec=sections.find(s=>s.id===view.sectionId);
+  const live=detectSection();
+
+  let html = `<div class="controls">
+    <div class="field"><label>Class</label>
+      <select onchange="view.sectionId=this.value; render()">
+        ${sections.map(s=>`<option value="${s.id}" ${s.id===view.sectionId?'selected':''}>${esc(s.name)} (${esc(s.code)})</option>`).join('')}
+      </select></div>
+    <div class="field"><label>Date</label>
+      <input type="date" value="${view.date}" onchange="view.date=this.value; render()"></div>
+    ${live && live.id===view.sectionId && view.date===todayStr()
+        ? `<div class="field"><label>&nbsp;</label><span class="flag" style="background:var(--present)">● Meeting now</span></div>` : ''}
+  </div>`;
+
+  html += `<div class="meta">${esc(sec.name)} — ${prettyDate(view.date)}</div>`;
+
+  const roster=students.filter(s=>s.sectionId===view.sectionId);
+  if(roster.length===0){
+    html += `<div class="empty"><p>No students in this class yet.</p>
+      <button class="btn secondary" onclick="setTab('manage')">Add students</button></div>`;
+    app.innerHTML=html; return;
+  }
+
+  if(!sessionExists(view.sectionId, view.date)){
+    html += `<div class="empty">
+      <p>No attendance recorded for this date yet.</p>
+      <p style="color:var(--ink-dim)">Starting a session marks everyone <b>present</b> — then tap the exceptions.</p>
+      <button class="btn" onclick="startSession(view.sectionId,view.date); render()">Start attendance</button>
+    </div>`;
+    html += talliesPanel(view.sectionId);
+    app.innerHTML=html; return;
+  }
+
+  // tiles
+  const dn=displayNames(view.sectionId);
+  const ordered=roster.slice().sort((a,b)=>dn[a.id].localeCompare(dn[b.id]));
+  html += `<div class="tiles">`;
+  ordered.forEach(s=>{
+    const key=attKey(view.sectionId,view.date,s.id);
+    const st=attendance[key]||'present';
+    html += `<button class="pill s-${st}" onclick="onTile('${key}')">
+      <span class="glyph">${GLYPH[st]}</span>
+      <span class="name">${esc(dn[s.id])}</span>
+      <span class="state">${st}</span>
+    </button>`;
+  });
+  html += `</div>`;
+
+  html += `<div class="btnrow">
+    <button class="btn danger" onclick="if(confirm('Clear this date\\'s attendance for this class?')){clearSession(view.sectionId,view.date); render();}">Clear this session</button>
+  </div>`;
+
+  html += talliesPanel(view.sectionId);
+  app.innerHTML=html;
+}
+
+function onTile(key){ cycle(key); render(); }
+
+function talliesPanel(sectionId){
+  const rows=tallies(sectionId);
+  return `<div class="panel"><h2>Running tallies — this class</h2>
+    <table><thead><tr>
+      <th>Student</th><th class="num">Present</th><th class="num">Tardy</th><th class="num">Absent</th>
+      <th class="num">Eff. absences</th><th>Reminder</th></tr></thead><tbody>
+      ${rows.map(r=>`<tr>
+        <td>${esc(r.name)}</td>
+        <td class="num">${r.p}</td><td class="num">${r.t}</td><td class="num">${r.a}</td>
+        <td class="num">${r.eff}</td>
+        <td>${reminderCell(r)}</td>
+      </tr>`).join('')}
+    </tbody></table>
+    <div class="meta" style="margin-top:10px;">Effective absences = absences + (tardies ÷ 3, rounded down). Reminder emails trigger at <b>3</b> and <b>7</b> effective absences.</div>
+  </div>`;
+}
+function reminderCell(r){
+  if(r.due) return `<button class="btn" style="padding:6px 12px;font-size:13px;" onclick="sendReminder('${r.id}',${r.due})">✉ Send ${r.due}-absence email</button>`;
+  if(r.sentMax) return `<span class="em" style="color:var(--ink-dim)">✓ ${r.sentMax}-absence email sent · <a href="#" onclick="resetReminder('${r.id}');return false;" style="color:var(--accent)">reset</a></span>`;
+  return '';
+}
+
+/* ---------- MANAGE ---------- */
+const DAYS=[['Sun',0],['Mon',1],['Tue',2],['Wed',3],['Thu',4],['Fri',5],['Sat',6]];
+let mSection=null; // section currently selected for roster editing
+
+function renderManage(){
+  if(mSection && !sections.some(s=>s.id===mSection)) mSection=null;
+  if(!mSection && sections.length) mSection=sections[0].id;
+
+  let html=`<div class="grid2">`;
+
+  /* --- left: classes --- */
+  html+=`<div class="panel"><h2>Classes</h2>`;
+  html+= sections.length ? sections.map(s=>`
+    <div class="roster-item">
+      <div><div class="dn">${esc(s.name)} <span class="em">(${esc(s.code)})</span></div>
+        <div class="em">${(s.days||[]).map(d=>DAYS[d][0]).join(' ')} · ${s.start}–${s.end}</div></div>
+      <button class="btn danger" onclick="delSection('${s.id}')">Delete</button>
+    </div>`).join('') : `<div class="em" style="color:var(--ink-dim)">No classes yet.</div>`;
+
+  html+=`<h2 style="margin-top:18px;">Add a class</h2>
+    <div class="field"><label>Course name</label><input type="text" id="f-name" placeholder="Typography 1"></div>
+    <div class="field" style="margin-top:8px;"><label>Course code</label><input type="text" id="f-code" placeholder="ART 2520"></div>
+    <div class="field" style="margin-top:8px;"><label>Meeting days</label>
+      <div class="daybox">${DAYS.map(([lbl,n])=>`<label><input type="checkbox" class="f-day" value="${n}">${lbl}</label>`).join('')}</div></div>
+    <div style="display:flex; gap:10px; margin-top:8px;">
+      <div class="field"><label>Start</label><input type="time" id="f-start" value="10:00"></div>
+      <div class="field"><label>End</label><input type="time" id="f-end" value="10:50"></div>
+    </div>
+    <div class="btnrow"><button class="btn" onclick="addSection()">Add class</button>
+      <button class="btn secondary" onclick="loadDemo()">Load demo class</button></div>
+  </div>`;
+
+  /* --- right: roster --- */
+  html+=`<div class="panel"><h2>Roster</h2>`;
+  if(!sections.length){
+    html+=`<div class="em" style="color:var(--ink-dim)">Add a class first.</div></div></div>`;
+    app.innerHTML=html; return;
+  }
+  html+=`<div class="field"><label>Class</label>
+    <select onchange="mSection=this.value; renderManage()">
+      ${sections.map(s=>`<option value="${s.id}" ${s.id===mSection?'selected':''}>${esc(s.name)}</option>`).join('')}
+    </select></div>`;
+
+  const dn=displayNames(mSection);
+  const roster=students.filter(s=>s.sectionId===mSection).sort((a,b)=>dn[a.id].localeCompare(dn[b.id]));
+  html+=`<div style="margin-top:12px;">`+
+    (roster.length ? roster.map(s=>`
+      <div class="roster-item">
+        <div><span class="dn">${esc(dn[s.id])}</span> <span class="em">${esc(s.email||'')}</span></div>
+        <button class="btn danger" onclick="delStudent('${s.id}')">Remove</button>
+      </div>`).join('') : `<div class="em" style="color:var(--ink-dim)">No students yet.</div>`)
+    +`</div>`;
+
+  html+=`<h2 style="margin-top:18px;">Add a student</h2>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <div class="field"><label>First name</label><input type="text" id="s-first" placeholder="Marcus"></div>
+      <div class="field"><label>Last name</label><input type="text" id="s-last" placeholder="Lee"></div>
+    </div>
+    <div class="field" style="margin-top:8px;"><label>Email</label><input type="email" id="s-email" placeholder="mlee@my.apsu.edu"></div>
+    <div class="meta" style="margin-top:8px;">Stored & shown as first name + last initial. Duplicates auto-extend (Marcus La. / Marcus Le.).</div>
+    <div class="btnrow"><button class="btn" onclick="addStudent()">Add student</button></div>
+  </div></div>`;
+
+  html += dataPanel();
+  app.innerHTML=html;
+}
+
+function dataPanel(){
+  const storeLabel = Storage.mode()==='idb' ? 'on-device database (IndexedDB)' : 'browser storage (file-mode fallback)';
+  return `<div class="panel" style="margin-top:20px;"><h2>Data &amp; backup</h2>
+    <div class="meta">Saving to: <b>${storeLabel}</b> · Last backup: <b>${fmtWhen(meta.lastBackupAt)}</b>${meta.changes>0?` · <span style="color:var(--tardy)">${meta.changes} change(s) since</span>`:''}</div>
+    <p style="color:var(--ink-dim); font-size:13px; max-width:62ch;">Clearing your browser erases the live data. Download a backup file, keep it in your Knowledge Vault, and restore it anytime to recover every class, roster, and attendance mark.</p>
+    <div class="btnrow">
+      <button class="btn" onclick="backupNow()">⬇ Backup all data (.json)</button>
+      <button class="btn secondary" onclick="triggerRestore()">⬆ Restore from backup</button>
+      <input type="file" id="restoreInput" accept="application/json" style="display:none" onchange="restoreFile(this)">
+    </div></div>`;
+}
+
+/* =========================================================================
+   ACTIONS
+   ========================================================================= */
+function addSection(){
+  const name=val('f-name'), code=val('f-code');
+  const days=[...document.querySelectorAll('.f-day:checked')].map(c=>Number(c.value));
+  const start=val('f-start'), end=val('f-end');
+  if(!name){ toast('Course name required'); return; }
+  if(!days.length){ toast('Pick at least one meeting day'); return; }
+  sections.push({id:uid(), name, code, days, start, end});
+  saveSections(); toast('Class added'); renderManage();
+}
+function delSection(id){
+  if(!confirm('Delete this class and its roster + attendance?')) return;
+  sections=sections.filter(s=>s.id!==id);
+  students=students.filter(s=>s.sectionId!==id);
+  Object.keys(attendance).forEach(k=>{ if(k.startsWith(id+'__')) delete attendance[k]; });
+  saveSections(); saveStudents(); saveAttendance();
+  if(mSection===id) mSection=null;
+  renderManage();
+}
+function addStudent(){
+  const first=val('s-first'), last=val('s-last'), email=val('s-email');
+  if(!first||!last){ toast('First and last name required'); return; }
+  students.push({id:uid(), sectionId:mSection, first, last, email});
+  saveStudents(); toast('Student added'); renderManage();
+}
+function delStudent(id){
+  students=students.filter(s=>s.id!==id);
+  Object.keys(attendance).forEach(k=>{ if(k.endsWith('__'+id)) delete attendance[k]; });
+  saveStudents(); saveAttendance(); renderManage();
+}
+
+/* =========================================================================
+   EMAIL REMINDERS  — build a pre-filled mailto: link and open it.
+   Clicking marks every milestone <= this one as handled, so the same
+   student won't re-prompt until the next milestone (3 -> 7).
+   ========================================================================= */
+function buildMailto(student, row, milestone){
+  const sec=sections.find(s=>s.id===student.sectionId);
+  const subject=`Attendance reminder — ${sec.code||sec.name}`;
+  const next = milestone>=7
+    ? "You are nearing 9 absences, which results in automatic failure of the course (an F)."
+    : "You are approaching 5 absences, which removes one full letter grade from your final average.";
+  const body=
+`Hi ${student.first},
+
+This is a heads-up about your attendance in ${sec.name} (${sec.code}). As of ${prettyDate(todayStr())}, my records show ${row.eff} effective absences — ${row.a} absent and ${row.t} tardy (three tardies count as one absence).
+
+${next}
+
+Course attendance policy:
+- ${POLICY_LINES.join('\n- ')}
+
+If you will miss class or be late, alert me through Slack, and always check Slack for updates when you miss a class.
+
+${POLICY_SIGNATURE}`;
+  return 'mailto:'+(student.email||'')+'?subject='+encodeURIComponent(subject)+'&body='+encodeURIComponent(body);
+}
+function sendReminder(studentId, milestone){
+  const s=students.find(x=>x.id===studentId); if(!s) return;
+  if(!s.email) toast('No email on file — add one under Manage');
+  const row=tallies(s.sectionId).find(r=>r.id===studentId);
+  const url=buildMailto(s,row,milestone);
+  REMINDER_MILESTONES.filter(m=>m<=milestone).forEach(m=>{ reminders[remKey(s.sectionId,s.id,m)]=true; });
+  saveReminders();
+  window.location.href=url;   // opens your default mail app with everything filled in
+  render();
+}
+function resetReminder(studentId){
+  const s=students.find(x=>x.id===studentId); if(!s) return;
+  REMINDER_MILESTONES.forEach(m=>{ delete reminders[remKey(s.sectionId,s.id,m)]; });
+  saveReminders(); render();
+}
+
+/* =========================================================================
+   SEMESTER GRID  — students x every session date, plus CSV export.
+   ========================================================================= */
+function sessionDates(sectionId){
+  const set=new Set();
+  Object.keys(attendance).forEach(k=>{ const p=k.split('__'); if(p[0]===sectionId) set.add(p[1]); });
+  return [...set].sort();
+}
+function shortDate(d){ const [y,m,da]=d.split('-').map(Number); return new Date(y,m-1,da).toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
+
+function renderSemester(){
+  if(sections.length===0){ app.innerHTML=`<div class="empty"><p>No classes yet — add one under Manage.</p></div>`; return; }
+  if(!view.sectionId || !sections.some(s=>s.id===view.sectionId)) view.sectionId=sections[0].id;
+  const sec=sections.find(s=>s.id===view.sectionId);
+
+  let html=`<div class="controls">
+    <div class="field"><label>Class</label>
+      <select onchange="view.sectionId=this.value; render()">
+        ${sections.map(s=>`<option value="${s.id}" ${s.id===view.sectionId?'selected':''}>${esc(s.name)} (${esc(s.code)})</option>`).join('')}
+      </select></div>
+    <div class="field"><label>&nbsp;</label><button class="btn" onclick="exportCSV()">⬇ Export spreadsheet (CSV)</button></div>
+  </div>`;
+
+  const dates=sessionDates(view.sectionId);
+  if(dates.length===0){ html+=`<div class="empty"><p>No attendance recorded yet for ${esc(sec.name)}.</p></div>`; app.innerHTML=html; return; }
+
+  const dn=displayNames(view.sectionId);
+  const roster=students.filter(s=>s.sectionId===view.sectionId).sort((a,b)=>dn[a.id].localeCompare(dn[b.id]));
+  const tmap={}; tallies(view.sectionId).forEach(r=>tmap[r.id]=r);
+
+  html+=`<div class="panel" style="overflow:auto;"><h2>${esc(sec.name)} — semester grid</h2>
+    <table><thead><tr><th>Student</th>${dates.map(d=>`<th class="num">${shortDate(d)}</th>`).join('')}
+      <th class="num">P</th><th class="num">T</th><th class="num">A</th><th class="num">Eff</th></tr></thead><tbody>`;
+  roster.forEach(s=>{
+    html+=`<tr><td>${esc(dn[s.id])}</td>`;
+    dates.forEach(d=>{
+      const st=attendance[attKey(view.sectionId,d,s.id)];
+      html+=`<td class="num gc ${st?('g-'+st):''}">${st?st.charAt(0).toUpperCase():''}</td>`;
+    });
+    const r=tmap[s.id];
+    html+=`<td class="num">${r.p}</td><td class="num">${r.t}</td><td class="num">${r.a}</td><td class="num">${r.eff}</td></tr>`;
+  });
+  html+=`</tbody></table>
+    <div class="meta" style="margin-top:10px;">P = present · T = tardy · A = absent · blank = no session for that student. Export opens in Excel or Google Sheets.</div></div>`;
+  app.innerHTML=html;
+}
+
+function exportCSV(){
+  const sec=sections.find(s=>s.id===view.sectionId);
+  const dates=sessionDates(view.sectionId);
+  const dn=displayNames(view.sectionId);
+  const roster=students.filter(s=>s.sectionId===view.sectionId).sort((a,b)=>dn[a.id].localeCompare(dn[b.id]));
+  const tmap={}; tallies(view.sectionId).forEach(r=>tmap[r.id]=r);
+  const head=['Student',...dates.map(shortDate),'Present','Tardy','Absent','Eff. absences'];
+  const lines=[head];
+  roster.forEach(s=>{
+    const row=[dn[s.id]];
+    dates.forEach(d=>{ const st=attendance[attKey(view.sectionId,d,s.id)]; row.push(st?st.charAt(0).toUpperCase():''); });
+    const r=tmap[s.id]; row.push(r.p,r.t,r.a,r.eff);
+    lines.push(row);
+  });
+  const csv=lines.map(r=>r.map(csvCell).join(',')).join('\r\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download=((sec.code||sec.name).replace(/\s+/g,'_'))+'_attendance.csv';
+  a.click(); URL.revokeObjectURL(a.href);
+  toast('Spreadsheet exported');
+}
+function csvCell(v){ v=String(v); return /[",\r\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; }
+
+function loadDemo(){
+  const sid=uid();
+  sections.push({id:sid, name:'Typography 1', code:'ART 2520', days:[1,3,5], start:'10:00', end:'10:50'});
+  const names=[
+    ['Marcus','Lee'],['Marcus','Lang'],   // duplicate first+initial → Le. / La.
+    ['Priya','Shah'],['Dejounte','Carter'],['Saoirse','Quinn'],['Ada','Okafor'],
+    ['Ben','Tran'],['Chloe','Diaz'],['Devon','Brooks'],['Elena','Novak'],
+    ['Faisal','Rahman'],['Grace','Park'],['Hiro','Tanaka'],['Imani','Reed']
+  ];
+  names.forEach(([f,l])=> students.push({id:uid(), sectionId:sid, first:f, last:l,
+    email:(f[0]+l).toLowerCase()+'@my.apsu.edu'}));
+  saveSections(); saveStudents();
+  mSection=sid; view.sectionId=sid; view.date=todayStr();
+  toast('Demo class loaded'); setTab('today');
+}
+
+/* helpers */
+function val(id){ const el=document.getElementById(id); return el?el.value.trim():''; }
+function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+let toastTimer;
+function toast(msg){
+  const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove('show'),1600);
+}
+
+/* boot */
+boot();
+</script>
+</body>
+</html>

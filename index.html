@@ -179,7 +179,7 @@ function saveAttendance(){ Storage.set('attendance',attendance); bumpChange(); }
 function saveReminders(){ Storage.set('reminders',reminders); bumpChange(); }
 function saveAll(){ return Promise.all([Storage.set('sections',sections),Storage.set('students',students),
   Storage.set('attendance',attendance),Storage.set('reminders',reminders)]); }
-function bumpChange(){ meta.changes=(meta.changes||0)+1; Storage.set('meta',meta); updateNudge(); }
+function bumpChange(){ meta.changes=(meta.changes||0)+1; Storage.set('meta',meta); AutoSave.schedule(); updateNudge(); }
 function remKey(sec,stu,m){ return sec+'__'+stu+'__'+m; }
 function uid(){ return 'id'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
@@ -192,6 +192,7 @@ async function boot(){
   reminders  = await Storage.get('reminders')  || {};
   meta       = await Storage.get('meta')       || { lastBackupAt:null, changes:0, migrated:false };
   await migrateOld();
+  await AutoSave.boot();
   render(); updateNudge();
 }
 async function migrateOld(){
@@ -238,6 +239,12 @@ function restoreFile(input){
 }
 function updateNudge(){
   const n=document.getElementById('nudge'); if(!n) return;
+  if(AutoSave.status()==='reconnect'){
+    n.innerHTML=`<div class="nudgebar"><span>⚠ Auto-save is paused — Chrome needs permission to write your backup file again.</span>
+       <button class="btn" style="padding:5px 12px;font-size:13px;" onclick="AutoSave.reconnect()">↻ Reconnect</button></div>`;
+    return;
+  }
+  if(AutoSave.status()==='active'){ n.innerHTML=''; return; }   // changes stream to the file automatically
   n.innerHTML = (meta && meta.changes>0)
     ? `<div class="nudgebar"><span>⚠ ${meta.changes} change${meta.changes>1?'s':''} since your last backup — a cleared browser would lose them.</span>
        <button class="btn" style="padding:5px 12px;font-size:13px;" onclick="backupNow()">⬇ Back up now</button></div>`
@@ -245,6 +252,64 @@ function updateNudge(){
 }
 function fmtWhen(iso){ if(!iso) return 'never'; const d=new Date(iso);
   return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
+
+/* ---- File System auto-save (Chromium browsers, HTTPS / localhost only) ----
+   Link a real .json file in your Vault ONCE; thereafter every change writes to
+   it automatically — no "back up now" to remember. The file handle is kept in
+   IndexedDB so the link survives reloads (Chrome re-asks permission after a
+   browser restart; one "Reconnect" click restores it). Where the API is absent
+   (Safari, Firefox, file://) the manual backup button is the only path and the
+   auto-save controls hide themselves. */
+const AutoSave = (function(){
+  const supported = typeof window!=='undefined' && 'showSaveFilePicker' in window;
+  let handle=null, status='off', timer=null;   // status: off | active | reconnect
+  function refresh(){ if(view.tab==='manage') renderManage(); updateNudge(); }
+  function setStatus(s){ status=s; refresh(); }
+  function payload(){ return JSON.stringify({ app:'10Dance', version:1,
+    exportedAt:new Date().toISOString(), data:{sections,students,attendance,reminders} }, null, 2); }
+  async function writeFile(){
+    if(!handle) return false;
+    try{ const w=await handle.createWritable(); await w.write(payload()); await w.close(); return true; }
+    catch(e){ return false; }
+  }
+  async function flush(){
+    if(status!=='active' || !handle) return false;
+    if(await writeFile()){
+      meta.lastBackupAt=new Date().toISOString(); meta.changes=0; await Storage.set('meta',meta);
+      refresh(); return true;
+    }
+    setStatus('reconnect'); return false;   // write blocked — permission lapsed
+  }
+  function schedule(){ if(status!=='active') return; clearTimeout(timer); timer=setTimeout(flush, 600); }
+  async function link(){
+    if(!supported) return;
+    try{ handle=await window.showSaveFilePicker({ suggestedName:'10Dance_autosave.json',
+      types:[{description:'10Dance backup', accept:{'application/json':['.json']}}] }); }
+    catch(e){ return; }   // user cancelled the picker
+    await Storage.set('autosaveHandle', handle);
+    setStatus('active'); const ok=await flush();
+    toast(ok ? 'Auto-save on — every change now writes to that file' : 'Linked, but the first write failed');
+  }
+  async function reconnect(){
+    if(!handle) return;
+    try{ if(await handle.requestPermission({mode:'readwrite'})==='granted'){
+      setStatus('active'); if(await flush()) toast('Auto-save reconnected'); return; } }
+    catch(e){}
+    toast('Couldn’t reconnect — pick the file again');
+  }
+  async function unlink(){ handle=null; await Storage.set('autosaveHandle', null); setStatus('off'); toast('Auto-save turned off'); }
+  async function boot(){
+    if(!supported) return;
+    let h=null; try{ h=await Storage.get('autosaveHandle'); }catch(e){}
+    if(!h) return;
+    handle=h;
+    try{ setStatus(await h.queryPermission({mode:'readwrite'})==='granted' ? 'active' : 'reconnect'); }
+    catch(e){ setStatus('reconnect'); }
+  }
+  return { supported, link, reconnect, unlink, boot, schedule,
+    status:()=>status, fileName:()=>handle&&handle.name };
+})();
+window.AutoSave = AutoSave;   // expose for inline onclick handlers
 
 /* =========================================================================
    ATTENDANCE-POLICY EMAIL  — edit this text freely; it becomes the email body.
@@ -549,7 +614,36 @@ function dataPanel(){
       <button class="btn" onclick="backupNow()">⬇ Backup all data (.json)</button>
       <button class="btn secondary" onclick="triggerRestore()">⬆ Restore from backup</button>
       <input type="file" id="restoreInput" accept="application/json" style="display:none" onchange="restoreFile(this)">
-    </div></div>`;
+    </div>
+    ${autoSaveBlock()}</div>`;
+}
+
+function autoSaveBlock(){
+  const wrap = inner => `<div style="margin-top:16px; padding-top:14px; border-top:1px solid rgba(255,255,255,.08);">${inner}</div>`;
+  if(!AutoSave.supported){
+    return wrap(`<div class="meta">⚡ <b>Automatic file backup</b></div>
+      <p style="color:var(--ink-dim); font-size:13px; max-width:62ch;">Hands-off auto-save needs Chrome or Edge on an <code>https://</code> address. Open this site in Chrome to use it — the manual backup above always works.</p>`);
+  }
+  const st=AutoSave.status();
+  if(st==='active'){
+    return wrap(`<div class="meta">⚡ <b style="color:var(--present)">Auto-save on</b> · every change writes to <b>${AutoSave.fileName()||'your file'}</b></div>
+      <p style="color:var(--ink-dim); font-size:13px; max-width:62ch;">Nothing to remember — each tap is saved to that file automatically. Keep it in your Knowledge Vault and your data survives a cleared browser.</p>
+      <div class="btnrow">
+        <button class="btn secondary" onclick="AutoSave.link()">Change file</button>
+        <button class="btn secondary" onclick="AutoSave.unlink()">Turn off auto-save</button>
+      </div>`);
+  }
+  if(st==='reconnect'){
+    return wrap(`<div class="meta">⚡ <b style="color:var(--tardy)">Auto-save paused</b> · Chrome needs permission to write the file again</div>
+      <div class="btnrow">
+        <button class="btn" onclick="AutoSave.reconnect()">↻ Reconnect</button>
+        <button class="btn secondary" onclick="AutoSave.link()">Pick a new file</button>
+        <button class="btn secondary" onclick="AutoSave.unlink()">Turn off</button>
+      </div>`);
+  }
+  return wrap(`<div class="meta">⚡ <b>Automatic file backup (Chrome / Edge)</b></div>
+    <p style="color:var(--ink-dim); font-size:13px; max-width:62ch;">Link a file in your Vault once and 10Dance writes every change to it automatically — no “back up now” to remember. Chrome will ask you to pick the file and allow editing.</p>
+    <div class="btnrow"><button class="btn" onclick="AutoSave.link()">⚡ Turn on auto-save</button></div>`);
 }
 
 /* =========================================================================

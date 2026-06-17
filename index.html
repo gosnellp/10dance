@@ -179,7 +179,7 @@ function saveAttendance(){ Storage.set('attendance',attendance); bumpChange(); }
 function saveReminders(){ Storage.set('reminders',reminders); bumpChange(); }
 function saveAll(){ return Promise.all([Storage.set('sections',sections),Storage.set('students',students),
   Storage.set('attendance',attendance),Storage.set('reminders',reminders)]); }
-function bumpChange(){ meta.changes=(meta.changes||0)+1; Storage.set('meta',meta); AutoSave.schedule(); updateNudge(); }
+function bumpChange(){ meta.changes=(meta.changes||0)+1; meta.lastChangeAt=Date.now(); Storage.set('meta',meta); AutoSave.schedule(); Sync.schedule(); updateNudge(); }
 function remKey(sec,stu,m){ return sec+'__'+stu+'__'+m; }
 function uid(){ return 'id'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
@@ -191,8 +191,12 @@ async function boot(){
   attendance = await Storage.get('attendance') || {};
   reminders  = await Storage.get('reminders')  || {};
   meta       = await Storage.get('meta')       || { lastBackupAt:null, changes:0, migrated:false };
+  if(meta.lastChangeAt==null) meta.lastChangeAt=0;
+  if(!meta.sync) meta.sync={ fileId:null, lastSyncAt:0, deviceId:null };
+  if(!meta.sync.deviceId){ meta.sync.deviceId=uid(); await Storage.set('meta',meta); }
   await migrateOld();
   await AutoSave.boot();
+  await Sync.boot();
   render(); updateNudge();
 }
 async function migrateOld(){
@@ -310,6 +314,131 @@ const AutoSave = (function(){
     status:()=>status, fileName:()=>handle&&handle.name };
 })();
 window.AutoSave = AutoSave;   // expose for inline onclick handlers
+
+/* =========================================================================
+   MULTI-DEVICE SYNC  — optional (Phase 6). Auto, newest-wins sync of a single
+   10Dance_sync.json in the user's own Google Drive (narrow drive.file scope).
+   100% client-side: the browser calls Google's REST API directly, no server.
+   PRIVACY: student emails NEVER sync. They are whitelisted out before upload
+   and re-grafted onto the pulled roster by student id, so each device keeps its
+   own emails locally and they never reach the cloud.
+   ========================================================================= */
+const SYNC_FILE='10Dance_sync.json';
+const SYNC_SCOPE='https://www.googleapis.com/auth/drive.file';
+function getClientId(){ try{ return (localStorage.getItem('tenDance_gClientId')||'').trim(); }catch(e){ return ''; } }
+function setClientId(v){ try{ v ? localStorage.setItem('tenDance_gClientId',v) : localStorage.removeItem('tenDance_gClientId'); }catch(e){} }
+
+/* Pure reconciliation decision — unit-tested offline. Timestamps are ms numbers. */
+function decideSync(localChangeAt, lastSyncAt, cloudUpdatedAt){
+  if(cloudUpdatedAt==null) return 'push';                       // no cloud file yet
+  const localChanged=(localChangeAt||0) > (lastSyncAt||0);
+  if(cloudUpdatedAt <= (lastSyncAt||0)) return localChanged ? 'push' : 'in-sync';
+  return localChanged ? 'conflict' : 'pull';                    // cloud newer than last reconcile
+}
+/* Whitelist the fields that may leave the browser — email is deliberately excluded. */
+function buildSyncPayload(){
+  const cleanStudents=students.map(s=>({ id:s.id, sectionId:s.sectionId, first:s.first, last:s.last }));
+  return { app:'10Dance', kind:'sync', version:1, updatedAt:(meta.lastChangeAt||0),
+    deviceId:meta.sync&&meta.sync.deviceId, data:{ sections, students:cleanStudents, attendance, reminders } };
+}
+/* Apply a pulled cloud copy, preserving this device's local emails by id. */
+async function applyRemote(cloud){
+  const em={}; students.forEach(s=>{ if(s.email) em[s.id]=s.email; });
+  const d=cloud.data||{};
+  sections   = d.sections   || [];
+  students   = (d.students  || []).map(s=> em[s.id] ? Object.assign({}, s, {email:em[s.id]}) : s);
+  attendance = d.attendance || {};
+  reminders  = d.reminders  || {};
+  await saveAll();
+  meta.sync.lastSyncAt=cloud.updatedAt||0; meta.changes=0; await Storage.set('meta',meta);
+}
+
+const Sync = (function(){
+  let status='off';   // off | connecting | syncing | idle | needauth | error
+  let token=null, tokenExp=0, tokenClient=null, gisReady=false, timer=null;
+  function refresh(){ if(view.tab==='manage') renderManage(); }
+  function setStatus(s){ status=s; refresh(); }
+  function configured(){ return !!getClientId(); }
+
+  function loadGIS(){ return new Promise((res,rej)=>{
+    if(gisReady && window.google && google.accounts) return res();
+    const s=document.createElement('script'); s.src='https://accounts.google.com/gsi/client'; s.async=true; s.defer=true;
+    s.onload=()=>{ gisReady=true; res(); }; s.onerror=()=>rej(new Error('gis load'));
+    document.head.appendChild(s);
+  }); }
+  function initClient(){ tokenClient=google.accounts.oauth2.initTokenClient({ client_id:getClientId(), scope:SYNC_SCOPE, callback:()=>{} }); }
+  function haveToken(){ return token && Date.now() < tokenExp-60000; }
+  function requestToken(interactive){ return new Promise((res,rej)=>{
+    if(!tokenClient) return rej(new Error('no client'));
+    tokenClient.callback=(resp)=>{ if(resp&&resp.access_token){ token=resp.access_token; tokenExp=Date.now()+((resp.expires_in||3600)*1000); res(token); }
+      else rej(new Error((resp&&resp.error)||'auth')); };
+    try{ tokenClient.requestAccessToken({prompt: interactive?'consent':''}); }catch(e){ rej(e); }
+  }); }
+  async function ensureToken(interactive){ if(haveToken()) return token; return requestToken(interactive); }
+
+  async function api(url, opts){
+    const o=opts||{}; const headers=Object.assign({Authorization:'Bearer '+token}, o.headers||{});
+    const r=await fetch(url, Object.assign({}, o, {headers}));
+    if(r.status===401){ token=null; throw new Error('401'); }
+    return r;
+  }
+  async function findFile(){
+    const q=encodeURIComponent("name='"+SYNC_FILE+"' and trashed=false");
+    const r=await api('https://www.googleapis.com/drive/v3/files?spaces=drive&fields=files(id,modifiedTime)&q='+q);
+    if(!r.ok) throw new Error('find '+r.status);
+    const j=await r.json(); return (j.files&&j.files[0])||null;
+  }
+  async function readRemote(id){ const r=await api('https://www.googleapis.com/drive/v3/files/'+id+'?alt=media'); if(!r.ok) throw new Error('read '+r.status); return r.json(); }
+  async function writeRemote(body){
+    const id=meta.sync&&meta.sync.fileId;
+    if(id){
+      const r=await api('https://www.googleapis.com/upload/drive/v3/files/'+id+'?uploadType=media', { method:'PATCH', headers:{'Content-Type':'application/json'}, body });
+      if(r.status===404){ meta.sync.fileId=null; return writeRemote(body); }   // cloud file deleted — recreate
+      if(!r.ok) throw new Error('update '+r.status); return id;
+    }
+    const b='tendance'+Date.now(); const fileMeta=JSON.stringify({ name:SYNC_FILE, mimeType:'application/json' });
+    const multipart='--'+b+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'+fileMeta+
+      '\r\n--'+b+'\r\nContent-Type: application/json\r\n\r\n'+body+'\r\n--'+b+'--';
+    const r=await api('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', { method:'POST', headers:{'Content-Type':'multipart/related; boundary='+b}, body:multipart });
+    if(!r.ok) throw new Error('create '+r.status);
+    const j=await r.json(); meta.sync.fileId=j.id; return j.id;
+  }
+  async function pushNow(){ const p=buildSyncPayload(); await writeRemote(JSON.stringify(p)); meta.sync.lastSyncAt=p.updatedAt; await Storage.set('meta',meta); }
+
+  async function syncOnce(interactive){
+    if(!configured()) return;
+    setStatus('syncing');
+    try{
+      await loadGIS(); if(!tokenClient) initClient();
+      await ensureToken(interactive);
+      const f=await findFile(); let cloud=null;
+      if(f){ meta.sync.fileId=f.id; cloud=await readRemote(f.id); }
+      const action=decideSync(meta.lastChangeAt, meta.sync.lastSyncAt, cloud?cloud.updatedAt:null);
+      if(action==='push') await pushNow();
+      else if(action==='pull'){ await applyRemote(cloud); render(); }
+      else if(action==='conflict'){
+        if(confirm('Both this device and the cloud changed since the last sync.\n\nOK = load the cloud copy (lose this device’s unsynced edits)\nCancel = keep this device (overwrite the cloud copy)')){ await applyRemote(cloud); render(); }
+        else await pushNow();
+      }
+      setStatus('idle'); updateNudge(); if(interactive) toast('Synced');
+    }catch(e){
+      const msg=''+e;
+      if(msg.indexOf('401')>-1 || msg.indexOf('auth')>-1 || msg.indexOf('no client')>-1){ setStatus('needauth'); if(interactive) toast('Connect Google to sync'); }
+      else { setStatus('error'); if(interactive) toast('Sync failed — try again'); }
+    }
+  }
+  function schedule(){ if(!configured() || !haveToken()) return; clearTimeout(timer); timer=setTimeout(()=>syncOnce(false), 1500); }
+  async function connect(){ if(!configured()){ toast('Paste your Google Client ID first'); return; } setStatus('connecting'); await syncOnce(true); }
+  function disconnect(){ token=null; tokenExp=0; setStatus('off'); toast('Disconnected — your data stays on this device'); }
+  async function boot(){
+    if(!configured()){ setStatus('off'); return; }
+    try{ await loadGIS(); initClient(); await ensureToken(false); await syncOnce(false); }   // silent re-auth
+    catch(e){ setStatus('needauth'); }
+  }
+  return { boot, schedule, connect, disconnect, syncNow:()=>syncOnce(true), status:()=>status, configured,
+    saveClientId:(v)=>{ setClientId((v||'').trim()); refresh(); } };
+})();
+window.Sync = Sync;   // expose for inline onclick handlers
 
 /* =========================================================================
    ATTENDANCE-POLICY EMAIL  — edit this text freely; it becomes the email body.
@@ -596,13 +725,48 @@ function renderManage(){
       <div class="field"><label>First name</label><input type="text" id="s-first" placeholder="Marcus"></div>
       <div class="field"><label>Last name</label><input type="text" id="s-last" placeholder="Lee"></div>
     </div>
-    <div class="field" style="margin-top:8px;"><label>Email</label><input type="email" id="s-email" placeholder="mlee@my.apsu.edu"></div>
+    <div class="field" style="margin-top:8px;"><label>Email</label><input type="email" id="s-email" placeholder="mlee@students.apsu.edu"></div>
     <div class="meta" style="margin-top:8px;">Stored & shown as first name + last initial. Duplicates auto-extend (Marcus La. / Marcus Le.).</div>
     <div class="btnrow"><button class="btn" onclick="addStudent()">Add student</button></div>
   </div></div>`;
 
   html += dataPanel();
+  html += syncPanel();
   app.innerHTML=html;
+}
+
+function syncPanel(){
+  const ts = (meta.sync&&meta.sync.lastSyncAt) ? new Date(meta.sync.lastSyncAt).toISOString() : null;
+  let inner;
+  if(!getClientId()){
+    inner=`<p style="color:var(--ink-dim); font-size:13px; max-width:62ch;">Keep one roster across your phone and laptop through <b>your own Google Drive</b>. Setup is one-time. <b>Emails never sync</b> — they stay on each device; everything else (classes, students, attendance) does.</p>
+      <div class="field" style="margin-top:8px;"><label>Google Client ID <span class="em" style="color:var(--ink-dim)">(ends in .apps.googleusercontent.com)</span></label>
+        <input type="text" id="g-clientid" placeholder="…apps.googleusercontent.com"></div>
+      <div class="btnrow"><button class="btn" onclick="Sync.saveClientId(document.getElementById('g-clientid').value); if(Sync.configured()) Sync.connect();">Save &amp; connect</button></div>`;
+  } else {
+    const st=Sync.status();
+    const changeId=`<a href="#" onclick="if(confirm('Clear the saved Google Client ID on this device?')){Sync.disconnect();Sync.saveClientId('');}return false;" style="color:var(--accent); font-size:13px;">change Client ID</a>`;
+    if(st==='syncing'||st==='connecting'){
+      inner=`<div class="meta">🔄 <b>${st==='connecting'?'Connecting to Google…':'Syncing…'}</b></div>`;
+    } else if(st==='idle'){
+      inner=`<div class="meta">🔄 <b style="color:var(--present)">Sync on</b> · Last sync: <b>${fmtWhen(ts)}</b></div>
+        <p style="color:var(--ink-dim); font-size:13px; max-width:62ch;">Changes flow to your other device automatically. Emails stay local to each device.</p>
+        <div class="btnrow"><button class="btn" onclick="Sync.syncNow()">🔄 Sync now</button>
+          <button class="btn secondary" onclick="Sync.disconnect()">Disconnect</button></div>
+        <div class="meta" style="margin-top:8px;">${changeId}</div>`;
+    } else if(st==='error'){
+      inner=`<div class="meta">🔄 <b style="color:var(--absent)">Sync error</b> · Last sync: <b>${fmtWhen(ts)}</b></div>
+        <div class="btnrow"><button class="btn" onclick="Sync.syncNow()">↻ Try again</button>
+          <button class="btn secondary" onclick="Sync.disconnect()">Disconnect</button></div>
+        <div class="meta" style="margin-top:8px;">${changeId}</div>`;
+    } else {   // off | needauth
+      inner=`<div class="meta">🔄 <b>Sync across devices</b> · not connected</div>
+        <p style="color:var(--ink-dim); font-size:13px; max-width:62ch;">Connect to Google to push and pull this device’s data. Last sync: <b>${fmtWhen(ts)}</b>.</p>
+        <div class="btnrow"><button class="btn" onclick="Sync.connect()">Connect Google</button></div>
+        <div class="meta" style="margin-top:8px;">${changeId}</div>`;
+    }
+  }
+  return `<div class="panel" style="margin-top:20px;"><h2>Sync across devices</h2>${inner}</div>`;
 }
 
 function dataPanel(){
@@ -801,7 +965,7 @@ function loadDemo(){
     ['Faisal','Rahman'],['Grace','Park'],['Hiro','Tanaka'],['Imani','Reed']
   ];
   names.forEach(([f,l])=> students.push({id:uid(), sectionId:sid, first:f, last:l,
-    email:(f[0]+l).toLowerCase()+'@my.apsu.edu'}));
+    email:(f[0]+l).toLowerCase()+'@students.apsu.edu'}));
   saveSections(); saveStudents();
   mSection=sid; view.sectionId=sid; view.date=todayStr();
   toast('Demo class loaded'); setTab('today');
